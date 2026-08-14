@@ -11,6 +11,7 @@ from .base import (
     build_chat_completions_endpoint,
     extract_error_message,
     extract_image_url_from_response,
+    normalize_image_shape_params,
     summarize_payload_json_for_log,
     summarize_response_text_for_log,
 )
@@ -77,6 +78,8 @@ class OpenAIChatProvider(BaseProvider):
         # 🚀 将高级透传参数暴力注入到 Chat 协议的顶级结构中
         internal_keys = {"user_refs", "user_ref", "persona_refs", "persona_ref"}
         api_kwargs = {k: v for k, v in kwargs.items() if k not in internal_keys}
+        # 🎯 形状参数规范化：aspect_ratio/tier → 合法 size（16 对齐，size 优先）
+        api_kwargs = normalize_image_shape_params(self.config.model, api_kwargs)
         
         if api_kwargs:
             payload.update(api_kwargs)

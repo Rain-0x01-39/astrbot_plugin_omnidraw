@@ -38,6 +38,10 @@ class ChainManager:
             return request_kwargs
         if str(request_kwargs.get("resolution", "") or "").strip():
             return request_kwargs
+        if str(request_kwargs.get("aspect_ratio", "") or "").strip():
+            # 显式宽高比也是调用方意图，应走 provider 规范化换算，
+            # 不能被 default_size 压制（否则配置了默认尺寸的节点会无视 LLM 的比例要求）
+            return request_kwargs
 
         default_size = str(getattr(provider_config, "default_size", "") or "").strip()
         if default_size:

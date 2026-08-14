@@ -10,6 +10,7 @@ from astrbot.api import logger
 
 from .base import (
     BaseProvider,
+    align_size_to_16,
     extract_error_message,
     extract_image_url_from_response,
     guess_image_content_type,
@@ -253,6 +254,11 @@ class CustomEndpointProvider(BaseProvider):
             for key, value in kwargs.items()
             if key not in internal_keys
         }
+        # 🎯 自定义端点保留 aspect_ratio / resolution 透传（OpenRouter / Crazyrouter 类协议原生支持），
+        # 仅对显式像素 size 做 16 对齐容错（防严格后端拒绝非 16 倍数）；tier / 比例原样透传
+        raw_size = str(api_kwargs.get("size", "") or "").strip()
+        if raw_size:
+            api_kwargs["size"] = align_size_to_16(raw_size)
         headers = {"Authorization": "Bearer " + current_key}
 
         logger.info(f"📝 [自定义通道] 最终发送给 API 的核心提示词:\n{prompt}")

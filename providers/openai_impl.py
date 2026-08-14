@@ -10,6 +10,7 @@ from .base import (
     extract_error_message,
     extract_image_url_from_response,
     guess_image_content_type,
+    normalize_image_shape_params,
     summarize_payload_json_for_log,
     summarize_response_text_for_log,
 )
@@ -39,6 +40,9 @@ class OpenAIProvider(BaseProvider):
         # 🚀 剥离内置参数，剩下的全是用户或 LLM 透传的高级参数
         internal_keys = {"user_refs", "user_ref", "persona_refs", "persona_ref"}
         api_kwargs = {k: v for k, v in kwargs.items() if k not in internal_keys}
+        # 🎯 形状参数规范化：aspect_ratio/tier → 合法 size（16 对齐，size 优先），
+        # OpenAI 系端点不认识 aspect_ratio / resolution，统一换算避免 400 或静默出方图
+        api_kwargs = normalize_image_shape_params(self.config.model, api_kwargs)
 
         if ref_images:
             url = build_image_edits_endpoint(base_url)

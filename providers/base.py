@@ -147,6 +147,121 @@ def next_api_key(provider_id: str, api_keys: List[str]) -> str:
         return key
 
 
+def align_size_to_16(size: str) -> str:
+    """将 WIDTHxHEIGHT 像素尺寸的宽高对齐到 16 的整数倍（四舍五入，最小 16）。
+
+    非 WxH 格式（tier、比例、空串等）原样返回，便于透传。
+    """
+    match = re.fullmatch(r"\s*([0-9]+)\s*[xX×]\s*([0-9]+)\s*", str(size or ""))
+    if not match:
+        return str(size or "").strip()
+    width = int(match.group(1))
+    height = int(match.group(2))
+    width = max(16, (width + 8) // 16 * 16)
+    height = max(16, (height + 8) // 16 * 16)
+    return f"{width}x{height}"
+
+
+def _nearest_gpt1_size(ratio_width: int, ratio_height: int) -> str:
+    """宽高比 → gpt-image-1 系列最近官方档位（仅方/横/竖三档，按宽高比较即可）。"""
+    if ratio_width <= 0 or ratio_height <= 0:
+        return ""
+    if ratio_width > ratio_height:
+        return "1536x1024"
+    if ratio_height > ratio_width:
+        return "1024x1536"
+    return "1024x1024"
+
+
+def _ratio_to_pixels(model: str, ratio_width: int, ratio_height: int) -> str:
+    """宽高比 → OpenAI 系端点合法像素 size。
+
+    - gpt-image-2：以 1024 为基准换算，16 对齐，比例先归一到 1:3 ~ 3:1，上限 3840
+    - gpt-image-1 系列（默认）：映射到最近官方档位 1024x1024 / 1536x1024 / 1024x1536
+    """
+    if ratio_width <= 0 or ratio_height <= 0:
+        return ""
+    if ratio_width / ratio_height > 3:
+        ratio_width, ratio_height = 3, 1
+    elif ratio_height / ratio_width > 3:
+        ratio_width, ratio_height = 1, 3
+    model_lower = str(model or "").lower()
+    if "gpt-image-2" in model_lower:
+        base = 1024
+        if ratio_width >= ratio_height:
+            pixels = max(16, round(base * ratio_width / ratio_height / 16) * 16)
+            return f"{min(pixels, 3840)}x{base}"
+        pixels = max(16, round(base * ratio_height / ratio_width / 16) * 16)
+        return f"{base}x{min(pixels, 3840)}"
+    return _nearest_gpt1_size(ratio_width, ratio_height)
+
+
+def normalize_image_shape_params(model: str, api_kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """OpenAI 系节点形状参数规范化（对齐 OpenRouter 语义，size 优先）。
+
+    规则：
+    1. size 为显式像素 (WxH，容忍 x/X/×) → 16 对齐后直传；丢弃 aspect_ratio / resolution
+    2. size 为档位 (512/1K/2K/4K) → 换算基准像素（512/1024/2048/4096，clamp 3840），
+       若有 aspect_ratio 则组合成 WxH（16 对齐），否则方形；丢弃其余
+    3. 仅有 aspect_ratio (W:H，容忍中文冒号) → 按模型族换算像素 size
+    4. 无有效输入 → 清掉这三个键，不设置 size（让 default_size / 端点默认兜底）
+
+    返回新 dict，原 dict 不被修改。
+    """
+    normalized = dict(api_kwargs or {})
+    raw_size = str(normalized.pop("size", "") or "").strip()
+    raw_ratio = str(normalized.pop("aspect_ratio", "") or "").strip()
+    normalized.pop("resolution", None)
+
+    pixel_match = re.fullmatch(r"\s*([0-9]+)\s*[xX×]\s*([0-9]+)\s*", raw_size)
+    if pixel_match:
+        width, height = int(pixel_match.group(1)), int(pixel_match.group(2))
+        aligned = align_size_to_16(raw_size)
+        model_lower = str(model or "").lower()
+        if "gpt-image-2" not in model_lower:
+            # 老模型只接受官方档位：对齐后仍不在档位内则按比例映射到最近档位
+            if aligned not in {"1024x1024", "1536x1024", "1024x1536"}:
+                mapped = _nearest_gpt1_size(width, height)
+                if mapped:
+                    normalized["size"] = mapped
+                    return normalized
+        normalized["size"] = aligned
+        return normalized
+
+    tier_match = re.fullmatch(r"(512|[1-4]k)", raw_size, re.IGNORECASE)
+    if tier_match:
+        tier_text = tier_match.group(1).lower()
+        base = 512 if tier_text == "512" else int(tier_text[0]) * 1024
+        base = min(base, 3840)
+        ratio_match = re.fullmatch(r"\s*([0-9]+)\s*[：:]\s*([0-9]+)\s*", raw_ratio)
+        if ratio_match:
+            rw, rh = int(ratio_match.group(1)), int(ratio_match.group(2))
+            if rw > 0 and rh > 0:
+                if rw / rh > 3:
+                    rw, rh = 3, 1
+                elif rh / rw > 3:
+                    rw, rh = 1, 3
+                if rw >= rh:
+                    width = min(max(16, round(base * rw / rh / 16) * 16), 3840)
+                    normalized["size"] = f"{width}x{base}"
+                else:
+                    height = min(max(16, round(base * rh / rw / 16) * 16), 3840)
+                    normalized["size"] = f"{base}x{height}"
+                return normalized
+        normalized["size"] = f"{base}x{base}"
+        return normalized
+
+    ratio_match = re.fullmatch(r"\s*([0-9]+)\s*[：:]\s*([0-9]+)\s*", raw_ratio)
+    if ratio_match:
+        rw, rh = int(ratio_match.group(1)), int(ratio_match.group(2))
+        pixels = _ratio_to_pixels(model, rw, rh)
+        if pixels:
+            normalized["size"] = pixels
+        return normalized
+
+    return normalized
+
+
 def guess_image_content_type(image_path_or_url: str, content_type: str = "", fallback: str = "image/png") -> str:
     media_type = str(content_type or "").strip().split(";", 1)[0].strip()
     if media_type.startswith("image/"):
